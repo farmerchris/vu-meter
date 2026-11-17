@@ -155,8 +155,9 @@ pub struct Cli {
     pub files: Vec<PathBuf>,
 
     /// Use a test signal: sine[:FREQ[:DB]], square[:FREQ[:DB]], noise[:DB], pink[:DB],
-    /// sweep[:F0[:F1[:SECS[:DB[:END_DB]]]]], silence. Fields are optional (empty ones
-    /// too, e.g. sine::-20): 1000 Hz, sweep 20-20000 Hz over 10 s, -6 dBFS (noise -12).
+    /// sweep[:F0[:F1[:SECS[:DB[:END_DB]]]]], chords[:SECS[:DB[:DETUNE]]], silence. Fields
+    /// are optional (empty ones too, e.g. sine::-20): 1000 Hz, sweep 20-20000 Hz over
+    /// 10 s, chords 2 s each and in tune, -6 dBFS (noise -12).
     /// -g alone plays a 1 kHz sine
     #[arg(short = 'g', long, value_name = "SPEC", num_args = 0..=1, default_missing_value = crate::generator::DEFAULT_SPEC)]
     pub generate: Option<String>,

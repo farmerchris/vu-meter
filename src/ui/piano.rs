@@ -1,7 +1,8 @@
 //! Piano keyboard (`--piano`): the 88 keys A0–C8 with the key nearest the
 //! strongest tone lit. When the panel is too narrow for all of them, a window
-//! of keys follows the tone.
+//! of keys follows the tone. Other notes sounding with it are lit dimmer.
 
+use super::meter::OTHER_NOTE_COLOR;
 use super::title;
 use crate::app::App;
 use ratatui::buffer::Buffer;
@@ -49,6 +50,43 @@ pub fn key_name(midi: i32) -> String {
     )
 }
 
+/// The strongest tone of `frame` (Hz, dB), and the keys of the other notes
+/// sounding with it.
+pub fn lit_keys(frame: Option<&crate::analyzer::Frame>) -> (Option<(f32, f32)>, Vec<i32>) {
+    let Some(f) = frame else {
+        return (None, Vec::new());
+    };
+    let tone = f.peak_freq.filter(|&(_, db)| db > -100.0);
+    let also = if tone.is_some() {
+        f.other_tones
+            .iter()
+            .flatten()
+            .filter_map(|&(hz, _)| key_of(hz))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    (tone, also)
+}
+
+/// " + E5 G5" for a heading, lowest first; empty with no other notes.
+pub fn also_names(keys: &[i32]) -> String {
+    if keys.is_empty() {
+        return String::new();
+    }
+    let mut keys = keys.to_vec();
+    keys.sort_unstable();
+    let names: Vec<String> = keys.iter().map(|&k| key_name(k)).collect();
+    format!(" + {}", names.join(" "))
+}
+
+/// " · C major" for a heading when the notes of `frame` make a chord.
+pub fn chord_suffix(frame: Option<&crate::analyzer::Frame>) -> String {
+    frame
+        .and_then(crate::chord::of_frame)
+        .map_or_else(String::new, |c| format!(" · {c}"))
+}
+
 /// Columns per white key and the first visible white key, for `width`
 /// columns centred (as far as the keyboard allows) on `focus`.
 pub fn window(width: u16, focus: i32) -> (u16, i32, i32) {
@@ -68,15 +106,25 @@ pub fn render(app: &mut App, area: Rect, buf: &mut Buffer) {
         std::time::Instant::now(),
         |i| history.get(i).is_some(),
     );
-    let tone = app
-        .history
-        .get(shown)
-        .and_then(|f| f.peak_freq)
-        .filter(|&(_, db)| db > -100.0);
+    let (tone, also) = lit_keys(app.history.get(shown));
     let lit = tone.and_then(|(hz, _)| key_of(hz));
     let heading = match (tone, lit) {
-        (Some((hz, _)), Some(k)) => format!(" Piano  {} · {hz:.1} Hz ", key_name(k)),
+        (Some((hz, _)), Some(k)) => format!(
+            " Piano  {} · {hz:.1} Hz{}{} ",
+            key_name(k),
+            also_names(&also),
+            chord_suffix(app.history.get(shown))
+        ),
         _ => " Piano ".to_string(),
+    };
+    let key_bg = |m: i32, plain: Color| {
+        if lit == Some(m) {
+            LIT
+        } else if also.contains(&m) {
+            OTHER_NOTE_COLOR
+        } else {
+            plain
+        }
     };
     let block = Block::bordered().title(title(heading));
     let inner = block.inner(area);
@@ -97,7 +145,7 @@ pub fn render(app: &mut App, area: Rect, buf: &mut Buffer) {
         if !visible(wi) {
             continue;
         }
-        let bg = if lit == Some(m) { LIT } else { white_bg };
+        let bg = key_bg(m, white_bg);
         for r in 0..key_rows {
             for dx in 0..kw {
                 let cell = &mut buf[(col(wi) + dx, inner.y + r)];
@@ -111,11 +159,7 @@ pub fn render(app: &mut App, area: Rect, buf: &mut Buffer) {
     // neighbours (only the left one's last column when keys are narrow).
     for m in (LOWEST..=HIGHEST).filter(|&m| is_black(m)) {
         let left = white_index(m);
-        let bg = if lit == Some(m) {
-            LIT
-        } else {
-            Color::Indexed(16)
-        };
+        let bg = key_bg(m, Color::Indexed(16));
         let cols: &[u16] = if kw == 3 { &[2, 3] } else { &[1] };
         for &dx in cols {
             let wi = left + (dx / kw) as i32;
@@ -130,7 +174,7 @@ pub fn render(app: &mut App, area: Rect, buf: &mut Buffer) {
         }
     }
 
-    // Labels: the lit key's name under it, then every C that still fits.
+    // Labels: the lit keys' names under them, then every C that still fits.
     let y = inner.y + key_rows;
     let end = inner.x + inner.width;
     let mut taken: Vec<(u16, u16)> = Vec::new();
@@ -154,6 +198,9 @@ pub fn render(app: &mut App, area: Rect, buf: &mut Buffer) {
             k,
             Style::default().fg(LIT).add_modifier(Modifier::BOLD),
         );
+    }
+    for &m in &also {
+        label(buf, m, Style::default().fg(OTHER_NOTE_COLOR));
     }
     for m in (LOWEST..=HIGHEST).filter(|m| m.rem_euclid(12) == 0) {
         label(buf, m, Style::default().fg(Color::DarkGray));

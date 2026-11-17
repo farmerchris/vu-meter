@@ -5,6 +5,7 @@
 
 pub mod analyzer;
 pub mod app;
+pub mod chord;
 pub mod cli;
 #[cfg(target_os = "macos")]
 mod device_mac;

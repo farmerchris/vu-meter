@@ -529,6 +529,10 @@ pub struct App {
     pub monitor: bool,
     /// Chart rectangles (spectrogram, timeline) for mouse hit-testing.
     pub chart_rects: Vec<Rect>,
+    /// The spectrogram's chart, and the mouse pointer while it is over it
+    /// (for the crosshair).
+    pub spec_rect: Option<Rect>,
+    pub pointer: Option<(u16, u16)>,
     pub spec_cache: SpecCache,
 }
 
@@ -602,6 +606,8 @@ impl App {
             log: None,
             monitor: cli.monitor,
             chart_rects: Vec::new(),
+            spec_rect: None,
+            pointer: None,
             spec_cache: SpecCache::default(),
         }
     }
@@ -661,6 +667,9 @@ impl App {
         let Some(time) = self.history.get(frame).map(|f| f.time) else {
             return;
         };
+        // Markers that have scrolled out of the history are gone for good.
+        let first = self.history.first();
+        self.markers.retain(|m| m.frame >= first);
         match self.markers.iter().position(|m| m.frame == frame) {
             Some(i) => {
                 self.markers.remove(i);
@@ -757,12 +766,16 @@ impl App {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.handle_key(k),
             Event::Mouse(m) => {
-                let hit = self.chart_rects.iter().any(|r| {
+                let inside = |r: &Rect| {
                     m.column >= r.x
                         && m.column < r.x + r.width
                         && m.row >= r.y
                         && m.row < r.y + r.height
-                });
+                };
+                let hit = self.chart_rects.iter().any(inside);
+                let pointer = self.spec_rect.filter(inside).map(|_| (m.column, m.row));
+                let moved = pointer != self.pointer;
+                self.pointer = pointer;
                 match m.kind {
                     MouseEventKind::Down(MouseButton::Left)
                     | MouseEventKind::Drag(MouseButton::Left)
@@ -780,6 +793,7 @@ impl App {
                         self.nav(Nav::Right(4));
                         Action::Redraw
                     }
+                    _ if moved => Action::Redraw,
                     _ => Action::None,
                 }
             }

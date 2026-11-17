@@ -23,6 +23,9 @@ The 2.0 release turns the meter into a tool for files as much as for live inputs
 - **Shell completions.** `--completions bash|zsh|fish|elvish|powershell`.
 - **Window:** drop an audio file on the window to meter it; the Input menu gains Monitor Output and the marker commands, the View menu the scope.
 - **Status bar:** a file's length beside the position, and a MON badge while monitoring.
+- **Notes and chords** (experimental). Up to three more notes sounding with the strongest tone are found, leaving out its harmonics, and listed under it with their cents; the piano lights their keys. When the notes make a chord, it is named: triads, sixths and sevenths, e.g. `C# major`, `G7`, `C major/G`.
+- **Spectrogram crosshair.** Pointing at the spectrogram shows the frequency there and its note and cents, in the terminal and the window.
+- **Chord test signal.** `-g chords[:SECS[:DB[:DETUNE]]]` plays a progression of eight chords, optionally detuned.
 
 ### Changed
 
@@ -40,6 +43,9 @@ The 2.0 release turns the meter into a tool for files as much as for live inputs
 - The `--record` help named `r` as the key that toggles recording; it is `R` (`r` resets loudness).
 - The report's true peak for channels beyond the eighth read −inf; it is now at least the sample peak.
 - `vu-meter-gui --report` opened a window and ignored the option; it now says to use `vu-meter --report`.
+- The window could ask for a spectrogram texture wider than the graphics card allows (a window over 2048 points wide, e.g. full screen on a 5K display); the chart now uses at most that many time columns.
+- The text report printed silent channels' peak, true peak and RMS as -150.00 while other lines said -inf; they now say -inf. Values that round to zero no longer print as "-0.0".
+- "needs 3 s" was shown for the loudness range of any input without one, including long silent files.
 
 ### Compatibility
 

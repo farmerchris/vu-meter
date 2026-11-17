@@ -25,6 +25,12 @@ const PEAK_REACH_BINS: usize = 24;
 /// The dominant frequency stays on the previous tone while that tone is within
 /// this many dB of the strongest one, so it does not flip between harmonics.
 const TONE_STICK_DB: f32 = 3.0;
+/// Other notes sounding with the dominant tone: at most this many, each
+/// within this many dB of it. Harmonics of a stronger note, within this
+/// many cents of a whole multiple of it, are its colour, not notes.
+pub const OTHER_TONES: usize = 3;
+const OTHER_TONE_RANGE_DB: f32 = 20.0;
+const HARMONIC_CENTS: f32 = 40.0;
 /// Peak-hold marker fall rate once its hold time is over, dB/s.
 pub const HOLD_FALL_DB_S: f32 = 20.0;
 /// Equalizer band ballistics: the share of the gap to a new reading closed per
@@ -125,6 +131,8 @@ pub struct Frame {
     /// channel, or while either is silent.
     pub correlation: f32,
     pub peak_freq: Option<(f32, f32)>,
+    /// Other notes sounding with `peak_freq`, Hz and dB, strongest first.
+    pub other_tones: [Option<(f32, f32)>; OTHER_TONES],
     pub clipped: bool,
     /// Waveform for the scope panel, as fractions of `scope_scale` in
     /// 1/127ths: interleaved left/right pairs spread across the hop when
@@ -189,6 +197,7 @@ impl Default for Frame {
             lufs_lra: f32::NAN,
             correlation: f32::NAN,
             peak_freq: None,
+            other_tones: [None; OTHER_TONES],
             clipped: false,
             scope: Box::new([]),
             scope_scale: 0.0,
@@ -583,6 +592,9 @@ impl Analyzer {
             }
         }
         self.tone = peak_freq.map(|(hz, _)| hz);
+        let other_tones = peak_freq.map_or([None; OTHER_TONES], |main| {
+            other_tones(&self.power, bin_hz, lo, hi, main)
+        });
 
         let metered = self.cfg.channels.clamp(1, MAX_CHANNELS);
         let mut peak = [FLOOR_DB; MAX_CHANNELS];
@@ -671,6 +683,7 @@ impl Analyzer {
             lufs_lra: self.loudness.loudness_range(),
             correlation,
             peak_freq,
+            other_tones,
             clipped: self.hop_clip,
             scope,
             scope_scale,
@@ -728,6 +741,64 @@ fn hold_then_fall(v: &mut f32, age: &mut f32, level: f32, hold_s: f32, fall_db_s
             *v = (*v - fall_db_s * dt).max(level);
         }
     }
+}
+
+/// Whether `hz` is a harmonic (2x, 3x, ...) of `of`.
+fn is_harmonic(hz: f32, of: f32) -> bool {
+    let k = (hz / of).round();
+    k >= 2.0 && (1200.0 * (hz / (k * of)).log2()).abs() < HARMONIC_CENTS
+}
+
+/// Nearest MIDI note to `hz`.
+fn midi_of(hz: f32) -> i32 {
+    (69.0 + 12.0 * (hz / 440.0).log2()).round() as i32
+}
+
+/// Other notes sounding with the dominant tone `main` (Hz, dB): the
+/// strongest peaks of `power` between bins `lo` and `hi` that stand out as
+/// clearly as a dominant tone must, within `OTHER_TONE_RANGE_DB` of `main`,
+/// one per note, leaving out harmonics of stronger notes. Strongest first.
+fn other_tones(
+    power: &[f32],
+    bin_hz: f32,
+    lo: usize,
+    hi: usize,
+    main: (f32, f32),
+) -> [Option<(f32, f32)>; OTHER_TONES] {
+    let mut out = [None; OTHER_TONES];
+    let floor = 10f32.powf((main.1 - OTHER_TONE_RANGE_DB).max(TONE_MIN_DB) / 10.0);
+    let (lo, hi) = (lo.max(1), hi.min(power.len().saturating_sub(2)));
+    let mut peaks: Vec<usize> = (lo..=hi)
+        .filter(|&k| power[k] >= floor && power[k] > power[k - 1] && power[k] >= power[k + 1])
+        .collect();
+    peaks.sort_unstable_by(|&a, &b| power[b].total_cmp(&power[a]));
+    let mut found = vec![main];
+    for k in peaks.into_iter().take(4 * OTHER_TONES + 4) {
+        // A note already found (a main lobe has no other local maximum, and
+        // side lobes are too weak or too flat to pass).
+        if found
+            .iter()
+            .any(|&(hz, _)| (hz / bin_hz - k as f32).abs() <= 1.5)
+            || prominence_db(power, k, PEAK_SKIP_BINS, PEAK_REACH_BINS) < PEAK_PROMINENCE_DB
+        {
+            continue;
+        }
+        let Some((hz, db)) = peak_frequency(power, bin_hz, k, k) else {
+            continue;
+        };
+        if found
+            .iter()
+            .any(|&(f, _)| midi_of(f) == midi_of(hz) || is_harmonic(hz, f))
+        {
+            continue;
+        }
+        out[found.len() - 1] = Some((hz, db));
+        found.push((hz, db));
+        if found.len() > OTHER_TONES {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -941,6 +1012,65 @@ pub mod tests {
         let (_, frames) = run(config(1), &fresh);
         let (hz, _) = frames.last().unwrap().peak_freq.unwrap();
         assert!((hz - 660.0).abs() < 3.0, "{hz}");
+    }
+
+    #[test]
+    fn other_notes_of_a_chord_but_not_harmonics() {
+        let tone = |f: f32, a: f32, i: usize| {
+            a * (2.0 * std::f32::consts::PI * f * i as f32 / 48000.0).sin()
+        };
+        let notes = |frames: &[Frame]| -> Vec<i32> {
+            let f = frames.last().unwrap();
+            let mut v: Vec<i32> = std::iter::once(f.peak_freq)
+                .chain(f.other_tones)
+                .flatten()
+                .map(|(hz, _)| midi_of(hz))
+                .collect();
+            v.sort();
+            v
+        };
+        // C major: C5 E5 G5.
+        let chord: Vec<f32> = (0..9600)
+            .map(|i| tone(523.25, 0.2, i) + tone(659.26, 0.15, i) + tone(783.99, 0.1, i))
+            .collect();
+        assert_eq!(notes(&run(config(1), &chord).1), [72, 76, 79]);
+        // One note with strong harmonics is one note.
+        let rich: Vec<f32> = (0..9600)
+            .map(|i| tone(440.0, 0.3, i) + tone(880.0, 0.2, i) + tone(1320.0, 0.1, i))
+            .collect();
+        assert_eq!(notes(&run(config(1), &rich).1), [69]);
+        // A note far below the main one is not counted.
+        let faint: Vec<f32> = (0..9600)
+            .map(|i| tone(440.0, 0.3, i) + tone(600.0, 0.3 * 0.05, i))
+            .collect();
+        assert_eq!(notes(&run(config(1), &faint).1), [69]);
+        assert!(is_harmonic(660.0, 220.0) && !is_harmonic(330.0, 220.0));
+    }
+
+    #[test]
+    fn chord_generator_notes_are_found() {
+        use crate::generator::{parse_spec, Generator, CHORDS};
+        let mut cfg = config(1);
+        (cfg.fft_size, cfg.hop) = (4096, 1024);
+        // In tune, and 20 cents off: the same keys either way.
+        for spec in ["chords:1:-6", "chords:1:-6:20"] {
+            let mut g = Generator::new(parse_spec(spec).unwrap(), 48000);
+            let data: Vec<f32> = (0..48000 * CHORDS.len()).map(|_| g.next_sample()).collect();
+            let (_, frames) = run(cfg.clone(), &data);
+            for (i, (name, notes)) in CHORDS.iter().enumerate() {
+                // Mid-chord.
+                let f = &frames[(i * 48000 + 24000) / 1024];
+                let mut found: Vec<i32> = std::iter::once(f.peak_freq)
+                    .chain(f.other_tones)
+                    .flatten()
+                    .map(|(hz, _)| midi_of(hz))
+                    .collect();
+                found.sort();
+                let mut want = notes.to_vec();
+                want.sort();
+                assert_eq!(found, want, "{spec} {name}");
+            }
+        }
     }
 
     #[test]

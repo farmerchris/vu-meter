@@ -250,7 +250,6 @@ pub struct LoudnessMeter {
     max_short_term: f32,
     /// Short-term energies every 100 ms once 3 s are in, for loudness range.
     short_terms: GateHistogram,
-    short_count: u64,
     lra: f32,
 }
 
@@ -302,7 +301,6 @@ impl LoudnessMeter {
             max_momentary: f32::NEG_INFINITY,
             max_short_term: f32::NEG_INFINITY,
             short_terms: GateHistogram::default(),
-            short_count: 0,
             lra: f32::NAN,
         }
     }
@@ -312,7 +310,6 @@ impl LoudnessMeter {
     pub fn reset(&mut self) {
         self.blocks.clear();
         self.short_terms.clear();
-        self.short_count = 0;
         self.integrated = f32::NEG_INFINITY;
         self.max_momentary = f32::NEG_INFINITY;
         self.max_short_term = f32::NEG_INFINITY;
@@ -348,11 +345,7 @@ impl LoudnessMeter {
             if self.subs.len() == 30 {
                 self.max_short_term = self.max_short_term.max(self.short_term());
                 self.short_terms.add(self.subs.iter().sum::<f64>() / 30.0);
-                self.short_count += 1;
-                // Loudness range moves slowly: once a second is enough.
-                if self.short_count % 10 == 1 {
-                    self.lra = self.short_terms.range();
-                }
+                self.lra = self.short_terms.range();
             }
         }
     }

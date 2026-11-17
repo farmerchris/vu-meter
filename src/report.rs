@@ -124,10 +124,19 @@ pub struct Report {
     pub check: Option<Check>,
 }
 
+/// `v`, or 0 when it would print as "-0" with `dec` decimals.
+fn tidy(v: f32, dec: usize) -> f32 {
+    if v.abs() < 0.5 * 10f32.powi(-(dec as i32)) {
+        0.0
+    } else {
+        v
+    }
+}
+
 /// A level for text: two decimals, or -inf.
 fn db2(v: f32) -> String {
     if v.is_finite() && v > FLOOR_DB {
-        format!("{v:.2}")
+        format!("{:.2}", tidy(v, 2))
     } else {
         "-inf".into()
     }
@@ -136,7 +145,7 @@ fn db2(v: f32) -> String {
 /// A number for JSON: `null` when not finite.
 fn json_num(v: f32, dec: usize) -> String {
     if v.is_finite() && v > FLOOR_DB {
-        format!("{v:.dec$}")
+        format!("{:.dec$}", tidy(v, dec))
     } else {
         "null".into()
     }
@@ -306,11 +315,15 @@ impl Report {
                 .collect::<Vec<_>>()
                 .join("  ")
         };
-        let two = |v: &[f32]| per(&|c| format!("{:.2}", v[c]));
+        let two = |v: &[f32]| per(&|c| db2(v[c]));
         let _ = writeln!(out, "Peak          {}  dBFS", two(&self.peak));
         let _ = writeln!(out, "True peak     {}  dBTP", two(&self.true_peak));
         let _ = writeln!(out, "RMS           {}  dBFS", two(&self.rms));
-        let _ = writeln!(out, "Crest factor  {}  dB", two(&self.crest));
+        let _ = writeln!(
+            out,
+            "Crest factor  {}  dB",
+            per(&|c| format!("{:.2}", tidy(self.crest[c], 2)))
+        );
         let _ = writeln!(
             out,
             "DC offset     {}  dBFS",
@@ -323,7 +336,7 @@ impl Report {
         );
         let lu = |v: f32| {
             if v.is_finite() {
-                format!("{v:.1} LUFS")
+                format!("{:.1} LUFS", tidy(v, 1))
             } else {
                 "-inf".into()
             }
@@ -335,25 +348,27 @@ impl Report {
             out,
             "Loud. range   {}",
             if self.lra.is_finite() {
-                format!("{:.1} LU", self.lra)
-            } else {
+                format!("{:.1} LU", tidy(self.lra, 1))
+            } else if self.duration() < 3.0 {
                 "\u{2014} (needs 3 s)".into()
+            } else {
+                "\u{2014}".into()
             }
         );
         let _ = writeln!(out, "Max true peak {} dBTP", db2(self.max_true_peak));
         if self.plr().is_finite() {
-            let _ = writeln!(out, "PLR           {:.1} dB", self.plr());
+            let _ = writeln!(out, "PLR           {:.1} dB", tidy(self.plr(), 1));
         }
         if let Some(c) = self.correlation {
-            let _ = writeln!(out, "Correlation   {c:+.2}");
+            let _ = writeln!(out, "Correlation   {:+.2}", tidy(c, 2));
         }
-        let gain = self.gain_to_target();
+        let gain = tidy(self.gain_to_target(), 1);
         if gain.is_finite() {
             let _ = writeln!(
                 out,
                 "To target     {gain:+.1} dB to reach {} LUFS (true peak would be {:.1} dBTP)",
                 self.target,
-                self.max_true_peak + gain
+                tidy(self.max_true_peak + gain, 1)
             );
         }
         match self.dominant {
@@ -461,7 +476,7 @@ impl Report {
             if v.is_nan() {
                 String::new()
             } else if v.is_finite() && v > FLOOR_DB {
-                format!("{v:.dec$}")
+                format!("{:.dec$}", tidy(v, dec))
             } else {
                 "-inf".into()
             }
@@ -625,6 +640,20 @@ mod tests {
         assert_eq!(truncate_len(100, 2, 10, Some(10)), 0);
         assert_eq!(truncate_len(100, 2, 20, Some(10)), 0);
         assert_eq!(truncate_len(10, 2, 0, Some(1000)), 10);
+    }
+
+    #[test]
+    fn silence_and_zero_print_plainly() {
+        let (a, n) = tone(0.0, 4);
+        let r = Report::new("quiet", &a, n, -14.0, None).to_text();
+        assert!(r.contains("Peak            L      -inf"), "{r}");
+        assert!(r.contains("RMS             L      -inf"), "{r}");
+        // Long enough: the range is missing for want of loudness, not time.
+        assert!(r.contains("Loud. range   \u{2014}\n"), "{r}");
+        assert_eq!(db2(-0.001), "0.00");
+        assert_eq!(json_num(-0.04, 1), "0.0");
+        assert_eq!(format!("{:+.1}", tidy(-0.04, 1)), "+0.0");
+        assert_eq!(tidy(-0.06, 1), -0.06);
     }
 
     #[test]

@@ -176,6 +176,9 @@ fn restart(
     new.saved_recordings = std::mem::take(&mut app.saved_recordings);
     // The log carries on; markers belong to the history that is going.
     new.log = app.log.take();
+    if let Some(log) = &mut new.log {
+        log.rebase();
+    }
     new.reopens = app.reopens;
     // The old source stops when dropped here.
     *pump = Pump::new(cli, &new_source.info);

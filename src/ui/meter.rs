@@ -416,7 +416,8 @@ pub fn render(app: &mut App, area: Rect, buf: &mut Buffer) {
     // Blank separator rows only when there is room for them.
     let rows = rows + (mode == MeterMode::Lufs) as usize;
     let stereo = n == 2;
-    let needed = 1 + rows + 1 + 1 + stereo as usize + clipped as usize;
+    let tones = 1 + f.peak_freq.is_some() as usize + crate::chord::of_frame(f).is_some() as usize;
+    let needed = 1 + rows + 1 + tones + stereo as usize + clipped as usize;
     let spacious = inner.height as usize >= needed + 2;
     let mut y = inner.y;
     // Writes a readout line; returns its row, if it fitted.
@@ -511,7 +512,19 @@ pub fn render(app: &mut App, area: Rect, buf: &mut Buffer) {
     if spacious {
         line(buf, String::new(), val);
     }
-    line(buf, tone_text(f), val);
+    let tl = tone_lines(f);
+    line(buf, tl.tone, val);
+    if let Some((main, others)) = tl.note {
+        let w = main.chars().count() as u16;
+        if let Some(y) = line(buf, main, val.add_modifier(Modifier::BOLD)) {
+            let room = (tw as u16).saturating_sub(w) as usize;
+            let st = Style::default().fg(OTHER_NOTE_COLOR);
+            buf.set_stringn(tx + w, y, others, room, st);
+        }
+    }
+    if let Some(chord) = tl.chord {
+        line(buf, chord, Style::default().fg(CHORD_COLOR));
+    }
     if clipped {
         line(
             buf,
@@ -586,17 +599,41 @@ pub fn row<S: AsRef<str>>(label: &str, cols: &[S]) -> String {
     s
 }
 
-/// Strongest tone and its nearest note, or a dash when nothing stands out.
-fn tone_text(f: &Frame) -> String {
-    match f.peak_freq {
-        Some((hz, db)) if db > -100.0 => format!(
-            "tone {hz:>7.1} Hz {:>COL_W$} dB {}",
-            fmt_db(db),
-            note_name(hz)
-        ),
-        _ => "tone —".into(),
+/// The tone readout, one line each: the strongest tone ("tone  261.6 Hz
+/// -12.0 dB", or a dash when nothing stands out); the notes sounding, its
+/// own first ("note  C 4 +00c") and the others after it, drawn dimmer
+/// ("   E 4 +00c  G 4 +00c"); and the chord they make ("chord C major").
+pub struct ToneLines {
+    pub tone: String,
+    pub note: Option<(String, String)>,
+    pub chord: Option<String>,
+}
+
+pub fn tone_lines(f: &Frame) -> ToneLines {
+    let Some((hz, db)) = f.peak_freq.filter(|&(_, db)| db > -100.0) else {
+        return ToneLines {
+            tone: "tone  —".into(),
+            note: None,
+            chord: None,
+        };
+    };
+    let others: String = f
+        .other_tones
+        .iter()
+        .flatten()
+        .map(|&(hz, _)| format!("  {}", note_name(hz)))
+        .collect();
+    ToneLines {
+        tone: format!("tone  {hz:>7.1} Hz {:>COL_W$} dB", fmt_db(db)),
+        note: Some((format!("note  {}", note_name(hz)), format!(" {others}"))),
+        chord: crate::chord::of_frame(f).map(|c| format!("chord {c}")),
     }
 }
+
+/// Colour of the chord name.
+pub const CHORD_COLOR: Color = Color::Cyan;
+/// Colour of the other notes, in the readout and on the piano.
+pub const OTHER_NOTE_COLOR: Color = Color::Indexed(67);
 
 /// Nearest musical note with cents offset in a fixed width, e.g. "A 4 +00c",
 /// "F#2 -41c", so the readout does not shift as the note changes.

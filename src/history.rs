@@ -101,6 +101,7 @@ pub mod tests {
             lufs_lra: f32::NAN,
             correlation: f32::NAN,
             peak_freq: None,
+            other_tones: [None; crate::analyzer::OTHER_TONES],
             clipped: peak >= 0.0,
             scope: Box::new([]),
             scope_scale: 0.0,

@@ -307,6 +307,13 @@ impl Layout {
     }
 }
 
+/// Time columns across the chart: one per point, but never more than the
+/// spectrogram texture may be wide.
+fn chart_columns(ctx: &egui::Context, plot: Option<Rect>) -> usize {
+    let max = ctx.input(|i| i.max_texture_side).max(1);
+    plot.map_or(1, |p| (p.width().round().max(1.0) as usize).min(max))
+}
+
 /// Draw every panel of `layout`.
 fn paint(p: &egui::Painter, layout: &Layout, app: &mut App, spec: &mut draw::SpecView) {
     if let Some(r) = layout.meter {
@@ -501,7 +508,7 @@ impl Gui {
             .spec
             .map(|r| draw::chart_plot(r, time_on_spec))
             .or(layout.timeline.map(|r| draw::chart_plot(r, true)));
-        self.app.view.width = plot.map_or(1, |p| p.width().round().max(1.0) as usize);
+        self.app.view.width = chart_columns(ui.ctx(), plot);
         self.app.sync_view();
 
         if let Some(plot) = plot {
@@ -521,6 +528,7 @@ impl Gui {
         let Some(&first) = charts.first() else { return };
         let all = charts.iter().fold(first, |a, r| a.union(*r));
         let resp = ui.interact(all, ui.id().with("charts"), Sense::click_and_drag());
+        self.spec.hover = resp.hover_pos();
         let col_w = plot.width() / self.app.view.width.max(1) as f32;
         if resp.is_pointer_button_down_on() || resp.clicked() {
             if let Some(pos) = resp.interact_pointer_pos() {
@@ -598,7 +606,7 @@ mod tests {
                     .spec
                     .map(|r| draw::chart_plot(r, l.timeline.is_none()))
                     .or(l.timeline.map(|r| draw::chart_plot(r, true)));
-                app.view.width = plot.map_or(1, |p| p.width().round().max(1.0) as usize);
+                app.view.width = chart_columns(ctx, plot);
                 app.sync_view();
                 paint(ui.painter(), &l, app, &mut spec);
                 layout = Some(l);
@@ -632,6 +640,8 @@ mod tests {
                     let (l, shapes) = draw(&mut a, size);
                     assert!(l.scope.is_some() && l.meter.is_some() && l.piano.is_some());
                     assert!(shapes > 50, "{channels} ch {mode:?} {size:?}: {shapes}");
+                    // Wider than a texture may be: the columns are capped.
+                    assert!(a.view.width <= 2048, "{}", a.view.width);
                 }
                 // Scrolled back, with markers and the help open.
                 for code in ['m', 'h', 'h', 'm', 'N', '?'] {

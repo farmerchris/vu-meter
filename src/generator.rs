@@ -1,6 +1,6 @@
 //! Synthetic test signals: `sine[:FREQ[:DB]]`, `square[:FREQ[:DB]]`,
 //! `noise[:DB]`, `pink[:DB]`, `sweep[:F0[:F1[:SECS[:DB[:END_DB]]]]]`,
-//! `silence`. Every field is optional: a missing or empty one takes its
+//! `chords[:SECS[:DB[:DETUNE]]]`, `silence`. Every field is optional: a missing or empty one takes its
 //! default (`DEFAULTS`), so `sweep`, `sine::-20` and `sweep:100::5` all work.
 
 use anyhow::{bail, Context, Result};
@@ -24,6 +24,12 @@ pub enum GenKind {
         secs: f64,
         end_db: Option<f64>,
     },
+    /// A progression of chords (`CHORDS`), each held `secs`, with every note
+    /// but the root `detune` cents off: sharp, flat, then half as sharp.
+    Chords {
+        secs: f64,
+        detune: f64,
+    },
     Silence,
 }
 
@@ -41,6 +47,28 @@ pub const DEFAULT_SWEEP: (f64, f64, f64) = (20.0, 20000.0, 10.0);
 /// well above its RMS).
 pub const DEFAULT_DB: f64 = -6.0;
 pub const DEFAULT_NOISE_DB: f64 = -12.0;
+
+/// Default chord length (s).
+pub const DEFAULT_CHORD_SECS: f64 = 2.0;
+/// The chords played, as MIDI notes, in close voicings around middle C.
+pub const CHORDS: [(&str, &[i32]); 8] = [
+    ("C", &[60, 64, 67]),
+    ("Am", &[57, 60, 64]),
+    ("F", &[53, 57, 60]),
+    ("G7", &[55, 59, 62, 65]),
+    ("Cmaj7", &[60, 64, 67, 71]),
+    ("Dm7", &[62, 65, 69, 72]),
+    ("E", &[64, 68, 71]),
+    ("Bdim", &[59, 62, 65]),
+];
+/// Relative levels of each note's harmonics, so it sounds like an
+/// instrument rather than bare sines.
+const PARTIALS: [f64; 3] = [1.0, 0.5, 0.25];
+/// How far each note of a chord is detuned, as a share of `detune`.
+const DETUNE_SPREAD: [f64; 4] = [0.0, 1.0, -1.0, 0.5];
+/// Fade in and out of each chord, s, so changes do not click.
+const CHORD_ATTACK: f64 = 0.01;
+const CHORD_RELEASE: f64 = 0.06;
 
 /// The `-g` value used when none is given.
 pub const DEFAULT_SPEC: &str = "sine";
@@ -90,8 +118,18 @@ pub fn parse_spec(s: &str) -> Result<GenSpec> {
                 6,
             )
         }
+        "chords" | "chord" => (
+            GenKind::Chords {
+                secs: field(1, "duration", DEFAULT_CHORD_SECS)?,
+                detune: field(3, "detune", 0.0)?,
+            },
+            2,
+            4,
+        ),
         "silence" => (GenKind::Silence, 1, 1),
-        other => bail!("unknown generator '{other}' (sine, square, noise, pink, sweep, silence)"),
+        other => {
+            bail!("unknown generator '{other}' (sine, square, noise, pink, sweep, chords, silence)")
+        }
     };
     if parts.len() > max_parts {
         bail!("generator '{s}' has too many fields");
@@ -102,6 +140,11 @@ pub fn parse_spec(s: &str) -> Result<GenSpec> {
         }
         GenKind::Sweep { f0, f1, secs, .. } if f0 <= 0.0 || f1 <= 0.0 || secs <= 0.0 => {
             bail!("sweep frequencies and duration must be positive")
+        }
+        GenKind::Chords { secs, detune }
+            if !(0.1..=3600.0).contains(&secs) || !(-50.0..=50.0).contains(&detune) =>
+        {
+            bail!("chord duration must be 0.1 to 3600 s, and detune -50 to 50 cents")
         }
         _ => {}
     }
@@ -195,6 +238,12 @@ impl Generator {
                     None => v,
                 }
             }
+            GenKind::Chords { secs, detune } => {
+                let t = self.n as f64 / self.sr;
+                let slot = (t / secs).floor();
+                let (_, notes) = CHORDS[slot as usize % CHORDS.len()];
+                chord_sample(notes, detune, t - slot * secs, secs)
+            }
             GenKind::Silence => 0.0,
         };
         self.n += 1;
@@ -208,6 +257,28 @@ impl Generator {
             frame.iter_mut().for_each(|x| *x = s);
         }
     }
+}
+
+/// The chord playing at `t` s into a `chords` signal of `secs` per chord.
+pub fn chord_at(t: f64, secs: f64) -> &'static str {
+    CHORDS[(t / secs).floor() as usize % CHORDS.len()].0
+}
+
+/// One sample of `notes` (MIDI) `t` s into a chord lasting `secs`, peaking
+/// at no more than 1.
+fn chord_sample(notes: &[i32], detune: f64, t: f64, secs: f64) -> f64 {
+    let env = (t / CHORD_ATTACK)
+        .min((secs - t) / CHORD_RELEASE)
+        .clamp(0.0, 1.0);
+    let mut v = 0.0;
+    for (&m, spread) in notes.iter().zip(DETUNE_SPREAD) {
+        let semis = m as f64 - 69.0 + detune * spread / 100.0;
+        let f = 440.0 * 2f64.powf(semis / 12.0);
+        for (h, a) in PARTIALS.iter().enumerate() {
+            v += a * (2.0 * PI * f * (h + 1) as f64 * t).sin();
+        }
+    }
+    env * v / (notes.len() as f64 * PARTIALS.iter().sum::<f64>())
 }
 
 /// Instantaneous frequency of an exponential sweep at time `t` within its period.
@@ -327,6 +398,9 @@ mod tests {
             "silence:1",
             "sweep:1:2:3:4:x",
             "sweep:1:2:3:4:5:6",
+            "chords:0",
+            "chords:1:-6:60",
+            "chords:1:2:3:4",
         ] {
             assert!(parse_spec(bad).is_err(), "{bad} should fail");
         }
@@ -392,6 +466,35 @@ mod tests {
         );
         assert!((peak_db(47520) - -10.05).abs() < 0.1, "{}", peak_db(47520));
         assert!((peak_db(48000) - -19.95).abs() < 0.1, "{}", peak_db(48000));
+    }
+
+    #[test]
+    fn chords() {
+        assert_eq!(
+            parse_spec("chords").unwrap(),
+            GenSpec {
+                kind: GenKind::Chords {
+                    secs: 2.0,
+                    detune: 0.0
+                },
+                level_db: -6.0
+            }
+        );
+        assert_eq!(
+            parse_spec("chord:1::15").unwrap().kind,
+            GenKind::Chords {
+                secs: 1.0,
+                detune: 15.0
+            }
+        );
+        // Never over the level, silent at each change, and a new chord
+        // every SECS.
+        let x = render("chords:0.5:-6", 48000 * 4);
+        assert!(peak_abs(&x) <= 10f32.powf(-6.0 / 20.0) + 1e-6);
+        assert!(peak_abs(&x[..96]) < 0.1 && x[24000] == 0.0);
+        assert!(rms(&x[6000..18000]) > 0.05);
+        assert_eq!((chord_at(0.2, 0.5), chord_at(0.7, 0.5)), ("C", "Am"));
+        assert_eq!(chord_at(4.1, 0.5), "C", "the progression repeats");
     }
 
     #[test]

@@ -417,6 +417,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.view.width = chart_w.max(1) as usize;
     app.sync_view();
     app.chart_rects.clear();
+    app.spec_rect = None;
 
     let buf = f.buffer_mut();
     if let Some(r) = top_rect {
@@ -458,6 +459,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(r) = spec_rect {
         let c = spectrogram::render(app, r, buf);
         app.chart_rects.push(c);
+        app.spec_rect = Some(c);
     }
     if let Some(r) = tl_rect {
         let c = timeline::render(app, r, buf);
@@ -635,6 +637,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("Home / End  g / G", "oldest data / back to live"),
     ("space", "hold / release the display"),
     ("click / wheel", "place the cursor / scroll"),
+    ("point", "spectrogram crosshair: Hz and note"),
     ("+ / -  ↑ / ↓", "zoom the time axis in / out"),
     ("p", "pause / resume the input"),
     ("o", "listen to a file or test signal (monitor output)"),

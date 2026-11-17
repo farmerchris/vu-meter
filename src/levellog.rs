@@ -45,6 +45,8 @@ pub struct LevelLog<W: Write = BufWriter<File>> {
     /// Stream time at which the row in progress ends.
     next: f64,
     acc: Interval,
+    /// Added to frame times: the stream time before the input restarted.
+    offset: f64,
     /// The newest frame's time and end-of-interval readings (short-term,
     /// integrated, range, correlation).
     last: (f64, [f32; 4]),
@@ -80,14 +82,22 @@ impl<W: Write> LevelLog<W> {
             path: PathBuf::new(),
             interval,
             next: interval,
+            offset: 0.0,
             acc: Interval::default(),
             last: (0.0, [f32::NAN; 4]),
             rows: 0,
         })
     }
 
+    /// Carry on across an input restart, whose frame times start again
+    /// from zero: the new stream continues where the old one stopped.
+    pub fn rebase(&mut self) {
+        self.offset = self.last.0;
+    }
+
     /// Fold in a frame, writing a row once it reaches the end of the interval.
     pub fn add(&mut self, f: &Frame) -> Result<()> {
+        let time = f.time + self.offset;
         let a = &mut self.acc;
         a.frames += 1;
         a.peak = a.peak.max(f.max_peak());
@@ -100,14 +110,14 @@ impl<W: Write> LevelLog<W> {
         }
         a.lufs_m = a.lufs_m.max(f.lufs_m);
         a.clipped |= f.clipped;
-        self.last = (f.time, [f.lufs_s, f.lufs_i, f.lufs_lra, f.correlation]);
+        self.last = (time, [f.lufs_s, f.lufs_i, f.lufs_lra, f.correlation]);
         // Half a millisecond of slack: frame times are sums of hops.
-        if f.time + 5e-4 < self.next {
+        if time + 5e-4 < self.next {
             return Ok(());
         }
         // After a gap in the stream (a paused input) the row is the one the
         // frame falls in, not a late one for each interval missed.
-        while self.next + self.interval <= f.time + 5e-4 {
+        while self.next + self.interval <= time + 5e-4 {
             self.next += self.interval;
         }
         self.row(self.next)?;
@@ -223,5 +233,30 @@ mod tests {
         assert!(lines[2].starts_with("4.000,-6.00"), "{text}");
         assert_eq!(cell(f32::NAN, 1), "");
         assert_eq!(cell(-3.25159, 2), "-3.25");
+    }
+
+    #[test]
+    fn restarted_input_carries_on() {
+        let mut log = LevelLog::new(Vec::new(), 1.0).unwrap();
+        for i in 1..=25 {
+            log.add(&frame(i as f64 * 0.1, -12.0, -20.0)).unwrap();
+        }
+        // The input restarts: its frame times begin again at zero.
+        log.rebase();
+        for i in 1..=20 {
+            log.add(&frame(i as f64 * 0.1, -6.0, -20.0)).unwrap();
+        }
+        log.finish().unwrap();
+        let text = String::from_utf8(log.into_inner()).unwrap();
+        let times: Vec<&str> = text
+            .lines()
+            .skip(1)
+            .map(|l| l.split(',').next().unwrap())
+            .collect();
+        assert_eq!(
+            times,
+            ["1.000", "2.000", "3.000", "4.000", "4.500"],
+            "{text}"
+        );
     }
 }

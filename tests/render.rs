@@ -778,3 +778,19 @@ fn help_lists_the_new_keys() {
         assert!(t.contains(needle), "{needle}\n{t}");
     }
 }
+
+#[test]
+fn chords_are_named_with_their_notes() {
+    // A second into the chord generator: C major (C4 E4 G4).
+    let mut app = make_app_with(&["-p", "meter,piano"], 2, 1.0, "chords:2:-6");
+    let t = text(&render(&mut app, 120, 30));
+    // The strongest note leads its own line, the others follow it.
+    let note = t.lines().find(|l| l.contains("note  ")).unwrap_or_default();
+    let notes: Vec<&str> = ["note  C 4 ", "E 4 ", "G 4 "]
+        .into_iter()
+        .filter(|n| note.contains(n))
+        .collect();
+    assert_eq!(notes.len(), 3, "{t}");
+    assert!(t.contains("chord C major"), "{t}");
+    assert!(t.contains("· C major"), "piano heading: {t}");
+}

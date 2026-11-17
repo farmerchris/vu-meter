@@ -5,14 +5,15 @@
 use super::color::{c32, BG, GRID, LABEL, PANEL, TEXT, TRACK};
 use crate::app::{App, MeterMode};
 use crate::dsp::quant::q_to_db;
-use crate::dsp::scale::{pixel_bin_ranges, to_unit, FreqScale};
+use crate::dsp::scale::{from_unit, pixel_bin_ranges, to_unit, FreqScale};
 use crate::source::SourceKind;
 use crate::ui::colormap::{
     build_lut, eq_gradient, ColorMap, ColorMode, LU_M_COLOR, LU_OVER_COLOR, LU_S_COLOR,
     LU_TARGET_LINE,
 };
 use crate::ui::meter::{
-    channel_label, mode_scale, note_name, row, session_text, stereo_text, target_text, Scale,
+    channel_label, mode_scale, row, session_text, stereo_text, target_text, tone_lines, Scale,
+    CHORD_COLOR, OTHER_NOTE_COLOR,
 };
 use crate::ui::scope::{self, Trace};
 use crate::ui::spectrogram::{fold_column, freq_labels};
@@ -468,13 +469,21 @@ pub fn meter(p: &Painter, rect: Rect, app: &mut App) {
         line(&stereo_text(f.correlation, f.balance()), color);
     }
     y.set(y.get() + lh / 2.0);
-    let tone = match f.peak_freq {
-        Some((hz, db)) if db > -100.0 => {
-            format!("tone {hz:>7.1} Hz {:>6} dB {}", fmt_db(db), note_name(hz))
-        }
-        _ => "tone —".into(),
-    };
-    line(&tone, TEXT);
+    let tl = tone_lines(f);
+    line(&tl.tone, TEXT);
+    if let Some((main, others)) = tl.note {
+        let top = line(&main, Color32::WHITE);
+        p.text(
+            Pos2::new(tx + main.chars().count() as f32 * cw, top),
+            Align2::LEFT_TOP,
+            others,
+            font.clone(),
+            c32(OTHER_NOTE_COLOR),
+        );
+    }
+    if let Some(chord) = tl.chord {
+        line(&chord, c32(CHORD_COLOR));
+    }
     if clipped {
         let r = Rect::from_min_size(Pos2::new(tx, y.get() + 4.0), Vec2::new(cw * 6.0, lh));
         p.rect_filled(r, 3.0, c32(Color::Red));
@@ -601,14 +610,15 @@ pub fn piano_panel(p: &Painter, rect: Rect, app: &mut App) {
         .pick(app.view.cursor, app.view.follow, Instant::now(), |i| {
             history.get(i).is_some()
         });
-    let tone = app
-        .history
-        .get(shown)
-        .and_then(|f| f.peak_freq)
-        .filter(|&(_, db)| db > -100.0);
+    let (tone, also) = piano::lit_keys(app.history.get(shown));
     let lit = tone.and_then(|(hz, _)| piano::key_of(hz));
     let title = match (tone, lit) {
-        (Some((hz, _)), Some(k)) => format!("Piano  {} · {hz:.1} Hz", piano::key_name(k)),
+        (Some((hz, _)), Some(k)) => format!(
+            "Piano  {} · {hz:.1} Hz{}{}",
+            piano::key_name(k),
+            piano::also_names(&also),
+            piano::chord_suffix(app.history.get(shown))
+        ),
         _ => "Piano".into(),
     };
     let inner = panel(p, rect, &title);
@@ -628,6 +638,16 @@ pub fn piano_panel(p: &Painter, rect: Rect, app: &mut App) {
     let keys_h = inner.height() - 16.0;
     let visible = |wi: i32| (first..first + count).contains(&wi);
     let lit_color = c32(Color::Cyan);
+    let also_color = c32(OTHER_NOTE_COLOR);
+    let key_fill = |m: i32, plain: Color32| {
+        if lit == Some(m) {
+            lit_color
+        } else if also.contains(&m) {
+            also_color
+        } else {
+            plain
+        }
+    };
     for m in (LOWEST..=HIGHEST).filter(|&m| !piano::is_black(m)) {
         let wi = piano::white_index(m);
         if !visible(wi) {
@@ -635,11 +655,7 @@ pub fn piano_panel(p: &Painter, rect: Rect, app: &mut App) {
         }
         let x = x0 + (wi - first) as f32 * kw;
         let r = Rect::from_min_size(Pos2::new(x, inner.top()), Vec2::new(kw - 1.0, keys_h));
-        let fill = if lit == Some(m) {
-            lit_color
-        } else {
-            Color32::from_gray(228)
-        };
+        let fill = key_fill(m, Color32::from_gray(228));
         p.rect_filled(r, 2.0, fill);
     }
     for m in (LOWEST..=HIGHEST).filter(|&m| piano::is_black(m)) {
@@ -653,14 +669,10 @@ pub fn piano_panel(p: &Painter, rect: Rect, app: &mut App) {
             Pos2::new(cx - bw / 2.0, inner.top()),
             Vec2::new(bw, keys_h * 0.62),
         );
-        let fill = if lit == Some(m) {
-            lit_color
-        } else {
-            Color32::from_gray(22)
-        };
+        let fill = key_fill(m, Color32::from_gray(22));
         p.rect_filled(r, 2.0, fill);
     }
-    // The lit key's name under it, then every C that still fits.
+    // The lit keys' names under them, then every C that still fits.
     let font = mono(10.0);
     let ly = inner.top() + keys_h + 2.0;
     let mut taken: Vec<(f32, f32)> = Vec::new();
@@ -687,6 +699,9 @@ pub fn piano_panel(p: &Painter, rect: Rect, app: &mut App) {
     if let Some(k) = lit {
         label(k, lit_color);
     }
+    for &m in &also {
+        label(m, also_color);
+    }
     for m in (LOWEST..=HIGHEST).filter(|m| m.rem_euclid(12) == 0) {
         label(m, LABEL);
     }
@@ -696,6 +711,8 @@ pub fn piano_panel(p: &Painter, rect: Rect, app: &mut App) {
 /// redraw only folds new frames.
 #[derive(Default)]
 pub struct SpecView {
+    /// The mouse pointer over the charts, for the crosshair.
+    pub hover: Option<Pos2>,
     tex: Option<TextureHandle>,
     range_key: Option<(usize, FreqScale, u32, u32, usize)>,
     ranges: Vec<(u32, u32)>,
@@ -835,6 +852,39 @@ pub fn spectrogram(p: &Painter, rect: Rect, app: &App, sv: &mut SpecView, time_a
             mono(10.5),
             LABEL,
         );
+    }
+    // Crosshair at the pointer, reading out its frequency and note.
+    if let Some(pos) = sv.hover.filter(|&q| plot.contains(q)) {
+        let u = ((plot.bottom() - pos.y) / plot.height()) as f64;
+        let hz = from_unit(d.freq_scale, u, a.min_freq as f64, a.max_freq as f64) as f32;
+        let stroke = Stroke::new(1.0, Color32::from_white_alpha(150));
+        p.line_segment(
+            [
+                Pos2::new(plot.left(), pos.y),
+                Pos2::new(plot.right(), pos.y),
+            ],
+            stroke,
+        );
+        p.line_segment(
+            [
+                Pos2::new(pos.x, plot.top()),
+                Pos2::new(pos.x, plot.bottom()),
+            ],
+            stroke,
+        );
+        let text = crate::ui::spectrogram::crosshair_text(hz);
+        let galley = p.layout_no_wrap(text, mono(READOUT_FONT), Color32::WHITE);
+        let size = galley.size() + Vec2::new(10.0, 6.0);
+        let mut at = pos + Vec2::new(10.0, -size.y - 6.0);
+        if at.x + size.x > plot.right() {
+            at.x = pos.x - 10.0 - size.x;
+        }
+        if at.y < plot.top() {
+            at.y = pos.y + 6.0;
+        }
+        let r = Rect::from_min_size(at, size);
+        p.rect_filled(r, 3.0, Color32::from_black_alpha(210));
+        p.galley(r.min + Vec2::new(5.0, 3.0), galley, Color32::WHITE);
     }
     // Colour key in the title row, right-aligned.
     let key = Rect::from_min_size(

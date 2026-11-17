@@ -6,7 +6,7 @@ use super::colormap::{build_lut, to_color, ColorMap, ColorMode};
 use super::{fmt_freq, split_axis, title};
 use crate::analyzer::Frame;
 use crate::app::App;
-use crate::dsp::scale::{pixel_bin_ranges, to_unit, FreqScale};
+use crate::dsp::scale::{from_unit, pixel_bin_ranges, to_unit, FreqScale};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -117,6 +117,45 @@ pub fn freq_labels(min: f32, max: f32, scale: FreqScale) -> Vec<f32> {
         decade *= 10.0;
     }
     out
+}
+
+/// Crosshair readout for frequency `hz` and its nearest note, e.g.
+/// "440.0 Hz  A 4 +00c".
+pub fn crosshair_text(hz: f32) -> String {
+    let f = if hz < 1000.0 {
+        format!("{hz:.1}")
+    } else {
+        format!("{hz:.0}")
+    };
+    format!("{f} Hz  {}", super::meter::note_name(hz))
+}
+
+/// Lines through the pointer at (`x`, `y`) across `chart`, with `text`
+/// beside it: right and above, unless that would leave the chart.
+fn draw_crosshair(buf: &mut Buffer, chart: Rect, x: u16, y: u16, text: &str) {
+    let line = Style::default().fg(Color::Gray);
+    for cx in chart.left()..chart.right() {
+        buf[(cx, y)].set_char('─').set_style(line);
+    }
+    for cy in chart.top()..chart.bottom() {
+        buf[(x, cy)].set_char('│').set_style(line);
+    }
+    buf[(x, y)].set_char('┼').set_fg(Color::White);
+    let label = format!(" {text} ");
+    let w = label.chars().count() as u16;
+    let lx = if x + 2 + w <= chart.right() {
+        x + 2
+    } else {
+        x.saturating_sub(w + 1).max(chart.x)
+    };
+    let ly = if y > chart.y { y - 1 } else { y + 1 }.min(chart.bottom() - 1);
+    buf.set_stringn(
+        lx,
+        ly,
+        label,
+        (chart.right() - lx) as usize,
+        Style::default().fg(Color::White).bg(Color::Black),
+    );
 }
 
 /// Colour key on the top border, right-aligned: ` -70 ▆▆▆▆▆▆▆▆▆▆▆▆ 0 dB `.
@@ -238,6 +277,14 @@ pub fn render(app: &mut App, area: Rect, buf: &mut Buffer) -> Rect {
         buf[(x, chart.y)].set_char('▼').set_fg(Color::White);
     }
     super::draw_markers(buf, app, chart);
+    if let Some((x, y)) = app.pointer.filter(|&(x, y)| {
+        (chart.left()..chart.right()).contains(&x) && (chart.top()..chart.bottom()).contains(&y)
+    }) {
+        // The frequency at the middle of the pointer's row.
+        let u = 1.0 - ((y - chart.y) as f64 + 0.5) / chart.height as f64;
+        let hz = from_unit(d.freq_scale, u, a.min_freq as f64, a.max_freq as f64) as f32;
+        draw_crosshair(buf, chart, x, y, &crosshair_text(hz));
+    }
 
     // Frequency axis.
     let style = Style::default().fg(Color::DarkGray);
@@ -295,6 +342,20 @@ mod tests {
         );
         let lin = freq_labels(1000.0, 5000.0, FreqScale::Linear);
         assert_eq!(lin, vec![1000.0, 2000.0, 3000.0, 4000.0, 5000.0]);
+    }
+
+    #[test]
+    fn crosshair_readout() {
+        assert_eq!(crosshair_text(440.0), "440.0 Hz  A 4 +00c");
+        assert_eq!(crosshair_text(2093.0), "2093 Hz  C 7 +00c");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+        let chart = Rect::new(2, 1, 36, 4);
+        draw_crosshair(&mut buf, chart, 35, 1, "100.0 Hz  G 2 +00c");
+        let row = |y: u16| (0..40).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        assert_eq!(buf[(35, 1)].symbol(), "┼");
+        assert_eq!(buf[(35, 4)].symbol(), "│");
+        // No room right of the pointer or above it: left and below.
+        assert!(row(2).contains(" 100.0 Hz  G 2 +00c  │"), "{}", row(2));
     }
 
     #[test]
